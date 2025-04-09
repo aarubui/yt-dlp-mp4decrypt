@@ -797,3 +797,23 @@ class ViuTVIE(InfoExtractor):
             'subtitles': subtitles,
             '_cenc_key': '91ba752a446148c68400d78374b178b4:a01d7dc4edf582496b7e73d67e9e6899',
         }
+
+
+
+from yt_dlp.extractor.tvp import TVPVODVideoIE as _TVPVODVideoIE
+class TVPVODVideoIE(_TVPVODVideoIE, plugin_name='yt-dlp-mp4decrypt'):
+    def _real_extract(self, url):
+        info_dict = super()._real_extract(url)
+        video_id = info_dict['id']
+
+        if "formats" in info_dict:
+            info_dict["formats"] = [
+                f for f in info_dict["formats"]
+                if f.get("container") == "mp4_dash"
+            ]
+
+        info_dict["_license_url"] = (
+            f"https://vod.tvp.pl/api/products/{video_id}/drm/widevine/external"
+            "?platform=BROWSER&type=MOVIE"
+        )
+        return info_dict
