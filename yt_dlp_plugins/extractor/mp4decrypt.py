@@ -3,6 +3,7 @@ import json
 import os
 import random
 import re
+import string
 import time
 import urllib.parse
 import uuid
@@ -24,6 +25,7 @@ from yt_dlp.utils import (
     parse_iso8601,
     parse_qs,
     traverse_obj,
+    update_url_query,
     urlencode_postdata,
     variadic,
 )
@@ -314,14 +316,16 @@ class Channel5IE(InfoExtractor):
 
 
 class DAZNIE(InfoExtractor):
-    _VALID_URL = r'https://www\.dazn\.com/(?P<lang>[a-z]{2})-\w+/(?:[^/]+/)+(?P<id>[0-9a-z]{20,})'
+    _VALID_URL = r'https://www\.dazn\.com/(?P<lang>[a-z]{2})-(?P<country>[A-Z]{2})/(?:[^/]+/)+(?P<id>[0-9a-z]{20,})'
+    _NETRC_MACHINE = 'dazn'
+    _USERTOKEN = None
 
     def _real_extract(self, url):
-        lang, content_id = self._match_valid_url(url).group('lang', 'id')
+        lang, country, content_id = self._match_valid_url(url).group('lang', 'country', 'id')
         user_agent, urlh = self._download_webpage_handle(
             'https://ifconfig.me/ua', None, 'Checking user agent', impersonate=True)
         target = urlh.extensions.get('impersonate', True)
-        auth = 'Bearer ' + self._get_token()
+        auth = 'Bearer ' + self._get_token(country)
 
         data = self._download_json(
             'https://api.playback.indazn.com/v5/Playback', content_id,
@@ -335,13 +339,18 @@ class DAZNIE(InfoExtractor):
             impersonate=target,
         )
 
-        formats, license_url = [], None
+        formats, license_urls = [], {}
+        sources = data['PlaybackDetails']
 
-        for source in data['PlaybackDetails'][-1:]:
-            cdn_token = {source['CdnToken']['Name']: source['CdnToken']['Value']}
+        if data['Asset']['IsLive'] and \
+                (no_drm := [s for s in sources if 'CdnToken' not in s]):
+            sources = no_drm
+
+        for source in sources:
+            cdn_token = {source['CdnToken']['Name']: source['CdnToken']['Value']} if 'CdnToken' in source else {}
+            mpd_url = update_url_query(source['ManifestUrl'], cdn_token)
             fmts = self._extract_mpd_formats(
-                source['ManifestUrl'], content_id,
-                query=cdn_token, headers={'user-agent': user_agent})
+                mpd_url, content_id, headers={'user-agent': user_agent}, fatal=False)
 
             for fmt in fmts:
                 fmt.update({
@@ -350,9 +359,9 @@ class DAZNIE(InfoExtractor):
                 })
 
             formats.extend(fmts)
-            license_url = source['LaUrl']
+            license_urls[mpd_url] = source['LaUrl']
 
-        def license_callback(challenge):
+        def license_callback(challenge, license_url):
             return self._request_webpage(
                 license_url, content_id, note='Fetching keys', data=challenge,
                 headers={'authorization': auth, 'content-type': 'application/octet-stream'},
@@ -363,14 +372,68 @@ class DAZNIE(InfoExtractor):
             **traverse_obj(data, {
                 'id': ('Asset', 'Id'),
                 'title': ('Asset', 'Title'),
+                'series': ('Asset', 'Competition', 'Title'),
             }),
             'formats': formats,
+            '_license_url': license_urls,
             '_license_callback': license_callback,
         }
 
-    def _get_token(self):
-        # return 'my-token'
-        device_id = hex(random.randint(0, 0x7fffffff)).zfill(10)
+    def _perform_login(self, username, password):
+        if self.cache.load(self._NETRC_MACHINE, username):
+            self.write_debug('Skipping logging in')
+            return
+
+        device_id = f'{random.randint(0, 0x7fffffff):x}'.zfill(10)
+        session_id = ''.join(random.choices(string.ascii_lowercase + string.digits, k=24))
+
+        login_response = self._download_json(
+            'https://authentication-prod.ar.indazn.com/v5/SignIn', None, 'Logging in',
+            data=json.dumps({
+                'Email': username, 'Password': password,
+                'Platform': 'web',
+                'DeviceId': device_id, 'ProfilingSessionId': session_id,
+            }).encode(),
+            headers={'accept': '*/*', 'content-type': 'application/json'})
+
+        self._USERTOKEN = login_response['AuthToken']['Token']
+        self.cache.store(self._NETRC_MACHINE, username, {
+            'device_id': device_id,
+            'response': login_response,
+        })
+
+    def _get_token(self, country):
+        if not self._USERTOKEN:
+            username, _ = self._get_login_info()
+
+            if not username:
+                self._USERTOKEN = self._get_anonymous_token()
+            elif user_data := self.cache.load(self._NETRC_MACHINE, username):
+                token = user_data['response']['AuthToken']['Token']
+                token_country = jwt_decode_hs256(token)['country']
+
+                if country.lower() != token_country or parse_iso8601(
+                        user_data['response']['AuthToken']['Expires']) < time.time() + 5:
+                    self.cache.store(self._NETRC_MACHINE, username, None)
+                    refresh_response = self._download_json(
+                        'https://ott-authz-bff-prod.ar.indazn.com/v5/RefreshAccessToken', None,
+                        'Refreshing access token',
+                        data=json.dumps({'DeviceId': user_data['device_id']}).encode(),
+                        headers={
+                            'accept': 'application/json',
+                            'content-type': 'application/json',
+                            'authorization': 'Bearer ' + token,
+                        })
+
+                    user_data['response'] = refresh_response
+                    self.cache.store(self._NETRC_MACHINE, username, user_data)
+
+                self._USERTOKEN = user_data['response']['AuthToken']['Token']
+
+        return self._USERTOKEN
+
+    def _get_anonymous_token(self):
+        device_id = f'{random.randint(0, 0x7fffffff):x}'.zfill(10)
         return self._download_json(
             'https://authentication-prod.ar.indazn.com/v1/anonymous-user', None,
             'Fetching anonymous token',
@@ -436,6 +499,7 @@ class ITVXIE(InfoExtractor):
         title_id, video_id = (video_id.replace('a', '/'), video_id) if video_id else (None, brand_id)
         titles = self._download_json(
             'https://content-inventory.prd.oasvc.itv.com/discovery', video_id,
+            note='Downloading title metadata',
             query={
                 'query': re.sub(r'\n\s+', ' ', query.strip()),
                 'variables': json.dumps({
@@ -492,6 +556,7 @@ class ITVXIE(InfoExtractor):
 
         brands = self._download_json(
             'https://content-inventory.prd.oasvc.itv.com/discovery', brand_id,
+            note='Downloading brand metadata',
             query={
                 'query': re.sub(r'\n\s+', ' ', query.strip()),
                 'variables': json.dumps({
