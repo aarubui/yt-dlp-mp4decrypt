@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "yt-dlp-mp4decrypt"
-version = "1.2.2.0"
+version = "1.2.2.1"
 dependencies = [
     "pywidevine>=1.8.0"
 ]

@@ -729,16 +729,12 @@ class MytvSuperIE(InfoExtractor):
         episode = self._download_json(
             'https://content-api.mytvsuper.com/v2/episode/id', episode_id,
             query={'episode_id': episode_id})
-        programme = self._download_json(
-            'https://content-api.mytvsuper.com/v1/programme/details', episode_id,
-            query={'programme_id': episode['programme_id']})
+        programme = self._get_programme(episode['programme_id'])
 
         return self._get_episode(programme, episode['currEpisode'], lang or 'tc')
 
     def _get_playlist(self, programme_id, lang):
-        programme = self._download_json(
-            'https://content-api.mytvsuper.com/v1/programme/details', programme_id,
-            query={'programme_id': programme_id})
+        programme = self._get_programme(programme_id)
         episodes = self._download_json(
             'https://content-api.mytvsuper.com/v1/episode/list', programme_id,
             query={
@@ -832,6 +828,12 @@ class MytvSuperIE(InfoExtractor):
 
         name = str(episode['episode_no'])
         return '%s/%s/%s' % (name[0:4], name[4:6], name[6:8])
+
+    def _get_programme(self, programme_id):
+        return self._download_json(
+            'https://content-api.mytvsuper.com/v1/programme/details', programme_id,
+            'Downloading programme data',
+            query={'programme_id': programme_id, 'platform': 'web'})
 
     def _get_programme_info(self, programme, lang):
         def tag_filter(types):

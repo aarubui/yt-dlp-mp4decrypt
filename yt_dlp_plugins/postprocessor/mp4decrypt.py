@@ -173,14 +173,14 @@ class Mp4DecryptDownloader:
 
 
 class Mp4DecryptExtractor:
-    def _parse_mpd_periods(self, mpd_doc, *args, **kwargs):
+    def _parse_mpd_periods(self, mpd_doc, mpd_id=None, *args, **kwargs):
         elements = mpd_doc.findall('.//{*}ContentProtection')
         found = False
 
         for element in elements:
             if element.get('schemeIdUri').lower() == PSSH.SystemId.Widevine.urn:
                 self._mixin_pp.add_mpd(
-                    kwargs.get('mpd_url') or args[2],
+                    kwargs.get('mpd_url') or args[1],
                     element.findtext('./{*}pssh'),
                     element.get('{urn:brightcove:2015}licenseAcquisitionUrl'),
                 )
@@ -200,9 +200,14 @@ class Mp4DecryptExtractor:
                 continue
             if (role := adaptation_set.find('{*}Role')) is not None:
                 for representation in adaptation_set.findall('{*}Representation[@id]'):
-                    roles[representation.get('id')] = role.get('value')
+                    format_id = representation.get('id')
 
-        for period_entry in self._mixin_class._parse_mpd_periods(self, mpd_doc, *args, **kwargs):
+                    if mpd_id:
+                        format_id = mpd_id + '-' + format_id
+
+                    roles[format_id] = role.get('value')
+
+        for period_entry in self._mixin_class._parse_mpd_periods(self, mpd_doc, mpd_id, *args, **kwargs):
             for fmt in period_entry['formats']:
                 if role := roles.get(fmt['format_id']):
                     fmt['format_note'] += f' ({role})'
