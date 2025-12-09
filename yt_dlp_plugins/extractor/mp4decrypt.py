@@ -438,18 +438,23 @@ class DAZNIE(InfoExtractor):
 
 
 class ITVXIE(InfoExtractor):
-    _VALID_URL = r'https://www\.itv\.com/watch/(?P<slug>[0-9a-z-]+)/(?P<brand>[0-9a]+B?)(?:/(?P<id>[0-9a]+))?'
+    _VALID_URL = r'https://www\.itv\.com/watch/(?P<slug>[0-9a-z-]+)/(?P<brand>[A-Z0-9a]+)(?:/(?P<id>[A-Z0-9a]+))?'
 
     def _real_extract(self, url):
         slug, brand_id, video_id = self._match_valid_url(url).group('slug', 'brand', 'id')
 
-        if not video_id and not brand_id.endswith('B'):
-            if info_dict := self._get_brand(brand_id, slug):
+        if not video_id:
+            if re.search(r'\d+B$', brand_id):
+                pass
+            elif info_dict := self._get_brand(brand_id, slug):
                 return info_dict
+            elif re.match(r'\d+a\d+a\d+', brand_id):
+                video_id = brand_id
+                brand_id = None
 
         query = '''
             query GetProgramme(
-                $brandId: BrandLegacyId!
+                $brandId: BrandLegacyId
                 $id: TitleLegacyId
             ) {
                 titles(filter: { brandLegacyId: $brandId, legacyId: $id }) {
@@ -498,7 +503,7 @@ class ITVXIE(InfoExtractor):
             query={
                 'query': re.sub(r'\n\s+', ' ', query.strip()),
                 'variables': json.dumps({
-                    'brandId': brand_id.replace('a', '/'),
+                    'brandId': brand_id.replace('a', '/') if brand_id else None,
                     'id': title_id,
                 }, separators=(',', ':')),
             })['data']['titles']
@@ -516,6 +521,7 @@ class ITVXIE(InfoExtractor):
                 'title': 'title',
                 'description': ('synopses', 'epg'),
                 'release_year': 'productionYear',
+                'series': ('brand', 'title'),
                 'season_number': ('seriesNumber', {int_or_none}),
                 'episode_number': ('episodeNumber', {int_or_none}),
                 'genres': ('brand', 'genres', ..., 'name'),
@@ -554,7 +560,7 @@ class ITVXIE(InfoExtractor):
 
         brands = self._download_json(
             'https://content-inventory.prd.oasvc.itv.com/discovery', brand_id,
-            note='Downloading brand metadata',
+            fatal=False, note='Downloading brand metadata',
             query={
                 'query': re.sub(r'\n\s+', ' ', query.strip()),
                 'variables': json.dumps({
@@ -625,54 +631,34 @@ class ITVXIE(InfoExtractor):
                 'Content-Type': 'application/json',
             })
 
-        files = traverse_obj(data, ('Playlist', 'Video', 'MediaFiles', ..., {
-            'url': 'Href',
-            'license_url': 'KeyServiceUrl',
-            'resolution': ('Resolution', {int_or_none(default=0)}),
-        }))
-
-        return {
-            **traverse_obj(data, ('Playlist', 'Video', {
-                'duration': ('Duration', {parse_duration}),
-                'subtitles': ('Subtitles', ..., {'url': 'Href'}),
-            })),
-            'files': {file['resolution']: file for file in files},
+        info_dict = {
+            'formats': [],
+            'subtitles': {},
             'chapters': self._get_chapters(data),
+            'duration': traverse_obj(data, ('Playlist', 'Video', 'Duration', {parse_duration})),
+            '_license_url': {},
         }
+
+        if subtitles := traverse_obj(data, ('Playlist', 'Video', 'Subtitles', ..., {'url': 'Href'})):
+            self._merge_subtitles({'eng': subtitles}, target=info_dict['subtitles'])
+
+        for file in traverse_obj(data, ('Playlist', 'Video', 'MediaFiles', ...)):
+            if '.mp4' in file['Href']:
+                info_dict['formats'].append({'url': file['Href']})
+            elif fmts := self._extract_mpd_formats(
+                    file['Href'], video_id, file.get('Resolution'), fatal=False):
+                info_dict['formats'].extend(fmts)
+
+            if 'KeyServiceUrl' in file:
+                info_dict['_license_url'][file['Href']] = file['KeyServiceUrl']
+
+        return info_dict
 
     def _get_episode(self, episode, video_id):
         if 'FREE' not in episode['tier'] and not self._get_user(video_id):
             self.raise_login_required('This video is only available for premium users')
 
-        hd_data = self._get_formats(episode, video_id, {'platformTag': 'ctv'})
-        sd_data = self._get_formats(episode, video_id, {'player': 'dash', 'platformTag': 'dotcom'})
-
-        info_dict = {
-            'formats': [],
-            'subtitles': {},
-            'chapters': hd_data['chapters'],
-            'duration': hd_data['duration'],
-            '_license_url': {},
-        }
-
-        if 720 in hd_data['files'] and 1080 in hd_data['files']:
-            del hd_data['files'][720]
-        if 0 in hd_data['files'] and 0 in sd_data['files']:
-            del sd_data['files'][0]
-
-        for data in (hd_data, sd_data):
-            if 'subtitles' in data:
-                self._merge_subtitles({'eng': data['subtitles']}, target=info_dict['subtitles'])
-
-            for _, file in data['files'].items():
-                if '.mp4' in file['url']:
-                    info_dict['formats'].append({'url': file['url']})
-                else:
-                    info_dict['formats'].extend(self._extract_mpd_formats(file['url'], video_id))
-                if 'license_url' in file:
-                    info_dict['_license_url'][file['url']] = file['license_url']
-
-        return info_dict
+        return self._get_formats(episode, video_id, {'platformTag': 'ctv'})
 
     def _get_chapters(self, data):
         chapters = traverse_obj(data, (
