@@ -7,12 +7,14 @@ import tempfile
 from pywidevine.cdm import Cdm
 from pywidevine.device import Device
 from pywidevine.pssh import PSSH
+from yt_dlp.downloader.hls import HlsFD
 from yt_dlp.networking.common import Request
 from yt_dlp.postprocessor.common import PostProcessor
 from yt_dlp.utils import (
     Popen,
     PostProcessingError,
     UnavailableVideoError,
+    parse_m3u8_attributes,
     prepend_extension,
     truncate_string,
     variadic,
@@ -75,6 +77,9 @@ class Mp4DecryptPP(PostProcessor):
             info['__postprocessors'].append(self._decryptor)
 
     def _get_keys(self, info, part):
+        if part.get('protocol') == 'm3u8_native':
+            self._clean_m3u8(part)
+
         if keys := info.get('_cenc_key'):
             return tuple([arg for key in variadic(keys, str) for arg in ('--key', key)])
 
@@ -164,6 +169,37 @@ class Mp4DecryptPP(PostProcessor):
         self._keys[pssh] = keys
         self._downloader.cache.store(*cache_args, {'pssh': pssh, 'keys': keys})
         return keys
+
+    def _clean_m3u8(self, part):
+        m3u8_doc = self._downloader.urlopen(Request(
+            part['url'], headers=part.get('http_headers', {}),
+        )).read().decode('utf-8', 'ignore')
+
+        clean_doc = []
+        found = part['manifest_url'] in self._pssh
+        cleaned = False
+
+        for line in m3u8_doc.splitlines():
+            line = line.strip()
+
+            if line.startswith('#EXT-X-KEY'):
+                attrs = parse_m3u8_attributes(line[11:])
+
+                if not found and (uri := attrs.get('URI')) \
+                        and not uri.startswith('skd://'):
+                    pssh = PSSH(self._downloader.urlopen(uri).read())
+
+                    if pssh.system_id == PSSH.SystemId.Widevine:
+                        self._pssh[part['manifest_url']] = pssh.dumps()
+                        found = True
+
+                cleaned = True
+                continue
+
+            clean_doc.append(line)
+
+        if HlsFD._has_drm(m3u8_doc) and cleaned:
+            part['hls_media_playlist_data'] = '\n'.join(clean_doc)
 
 
 class Mp4DecryptDownloader:
