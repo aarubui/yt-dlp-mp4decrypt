@@ -842,16 +842,35 @@ class MytvSuperIE(InfoExtractor):
 
 
 class NHKOneIE(InfoExtractor):
-    _VALID_URL = r'https://www\.web\.nhk/tv/(?:[^/]+/)*ep/(?P<id>[A-Z0-9]+)'
+    _VALID_URL = r'https://www\.web\.nhk/tv/(?:[^/]+/)*ep/(?P<id>[A-Z0-9]+)(?:/(?P<part>[^/#]+))?'
 
     def _real_extract(self, url):
         content_id = self._match_id(url)
         info = self._download_json(
             f'https://api.web.nhk/r8/l/bundle/te/{content_id}.json', content_id,
             headers={'cookie': 'z_at=' + self._get_user_token()})
-        video_url = traverse_obj(info, (
-            'tvepisode', 'result', 0,
-            'video', 0, 'detailedVideoDescriptor', {require('VideoDescriptor')}))
+
+        videos = traverse_obj(info, ('tvepisode', 'result', 0, 'video'))
+
+        if part_id := self._match_valid_url(url).group('part'):
+            videos = [v for v in videos if v['id'] == part_id]
+
+        if len(videos) == 1:
+            return self._get_video(videos[0], info)
+
+        return {
+            '_type': 'multi_video',
+            **traverse_obj(info, ('tvepisode', 'result', 0, {
+                'id': 'id',
+                'title': 'name',
+                'description': 'description',
+            })),
+            'entries': [self._get_video(video, info) for video in videos],
+        }
+
+    def _get_video(self, video, info):
+        video_url = traverse_obj(video, 'detailedVideoDescriptor', {require('VideoDescriptor')})
+        content_id = video['id']
         data = self._download_json(video_url, content_id, headers={'referer': 'https://www.web.nhk/'})
 
         for playlist in data['manifests']:
@@ -874,10 +893,12 @@ class NHKOneIE(InfoExtractor):
                         headers={'authorization': 'Bearer ' + self._get_user_token()}).read()
 
                 return {
-                    **traverse_obj(info, ('tvepisode', 'result', 0, {
+                    **traverse_obj(video, {
                         'id': 'id',
                         'title': 'name',
                         'description': 'description',
+                    }),
+                    **traverse_obj(info, ('tvepisode', 'result', 0, {
                         'series': ('partOfSeries', 'name'),
                         'genres': ('identifierGroup', 'formatGenreTag', ..., 'name'),
                         'thumbnail': ('eyecatch', 'main', 'url'),
